@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Axis and Allies</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --ink: #1c1712;
+      --muted: #5e584e;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      background: #ffffff;
+      color: var(--ink);
+    }
+
+    body {
+      min-height: 100vh;
+      font-family: "IBM Plex Mono", ui-monospace, "Courier New", monospace;
+    }
+
+    .wrap {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 24px 40px;
+    }
+
+    a { color: var(--ink); }
+
+    .kicker {
+      font-family: "Press Start 2P", "Courier New", monospace;
+      font-size: 10px;
+      line-height: 1.6;
+      color: var(--muted);
+      margin: 0 0 14px;
+    }
+
+    .kicker a { color: var(--muted); }
+
+    h1 {
+      font-family: "Press Start 2P", "Courier New", monospace;
+      font-size: 22px;
+      font-weight: 400;
+      line-height: 1.45;
+      margin: 0 0 10px;
+    }
+
+    .deck {
+      max-width: 40rem;
+      margin: 0 0 22px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.55;
+    }
+
+    canvas {
+      image-rendering: crisp-edges;
+      image-rendering: pixelated;
+      display: block;
+    }
+
+    .floor {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      justify-content: center;
+      gap: 28px 24px;
+      overflow: visible;
+    }
+
+    .fighter {
+      appearance: none;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--ink);
+      border-radius: 8px;
+      padding: 12px 14px 10px;
+      cursor: pointer;
+      font: inherit;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-end;
+      flex: 0 0 auto;
+      overflow: visible;
+      text-decoration: none;
+    }
+
+    .fighter canvas {
+      margin: 0 auto;
+      flex-shrink: 0;
+    }
+
+    .who {
+      margin-top: 8px;
+      font-family: "Press Start 2P", "Courier New", monospace;
+      font-size: 8px;
+      line-height: 1.45;
+      text-align: center;
+    }
+
+    .fighter:hover,
+    .fighter:focus-visible {
+      border-color: var(--ink);
+      outline: none;
+    }
+
+    .foot {
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    @media (max-width: 720px) {
+      .wrap { padding: 20px 12px 32px; }
+      h1 { font-size: 16px; }
+      .fighter { padding: 10px 8px 8px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .fighter canvas { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <p class="kicker">For a small game · <a href="stage.html">Empty stage</a> · <a href="grounds.html">Battlegrounds</a> · <a href="juno.html">Juno Beach</a></p>
+    <h1>Axis and Allies</h1>
+    <p class="deck">The whole company on one screen. Click someone to walk them on an empty page.</p>
+    <div class="floor" id="floor"></div>
+    <p class="foot">Blatant Space. <a href="juno.html">21,400 at Juno</a>.</p>
+  </div>
+
+  <script src="sprites.js"></script>
+  <script>
+    const { palette, crew } = window.PIXEL_CREW;
+    const floor = document.getElementById("floor");
+    const GRID_SCALE = 3;
+    const WALK_FRAME_MS = 80;
+    const rowCanvases = [];
+    let rowStep = 0;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    function boundsOf(frames) {
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -1;
+      let maxY = -1;
+      frames.forEach(function (rows) {
+        rows.forEach(function (row, y) {
+          for (let x = 0; x < row.length; x++) {
+            if (row[x] === ".") continue;
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+          }
+        });
+      });
+      return { minX: minX, minY: minY, maxX: maxX, maxY: maxY };
+    }
+
+    function crop(frames, box) {
+      return frames.map(function (rows) {
+        const out = [];
+        for (let y = box.minY; y <= box.maxY; y++) out.push(rows[y].slice(box.minX, box.maxX + 1));
+        return out;
+      });
+    }
+
+    function viewOf(frames) {
+      const box = boundsOf(frames);
+      box.minX = Math.max(0, box.minX - 2);
+      box.minY = Math.max(0, box.minY - 2);
+      box.maxX = Math.min(frames[0][0].length - 1, box.maxX + 2);
+      box.maxY = Math.min(frames[0].length - 1, box.maxY + 2);
+      return crop(frames, box);
+    }
+
+    function paint(canvas, frames, index) {
+      const rows = frames[index % frames.length];
+      const ctx = canvas.getContext("2d");
+      const img = ctx.createImageData(canvas.width, canvas.height);
+      for (let y = 0; y < canvas.height; y++) {
+        const row = rows[y];
+        for (let x = 0; x < row.length; x++) {
+          const ch = row[x];
+          if (ch === ".") continue;
+          const hex = palette[ch] || "#ff00ff";
+          const n = parseInt(hex.slice(1), 16);
+          const i = (y * canvas.width + x) * 4;
+          img.data[i] = (n >> 16) & 255;
+          img.data[i + 1] = (n >> 8) & 255;
+          img.data[i + 2] = n & 255;
+          img.data[i + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+    }
+
+    crew.forEach(function (person) {
+      const link = document.createElement("a");
+      link.className = "fighter";
+      link.href = "stage.html?name=" + encodeURIComponent(person.name);
+      const canvas = document.createElement("canvas");
+      const frames = viewOf(person.forward);
+      canvas._frames = frames;
+      canvas.width = frames[0][0].length;
+      canvas.height = frames[0].length;
+      canvas.style.width = canvas.width * GRID_SCALE + "px";
+      canvas.style.height = canvas.height * GRID_SCALE + "px";
+      const label = document.createElement("div");
+      label.className = "who";
+      label.textContent = person.name;
+      link.append(canvas, label);
+      floor.append(link);
+      rowCanvases.push(canvas);
+      paint(canvas, frames, 0);
+    });
+
+    if (!reduceMotion) {
+      window.setInterval(function () {
+        rowStep = (rowStep + 1) % rowCanvases[0]._frames.length;
+        rowCanvases.forEach(function (canvas) {
+          paint(canvas, canvas._frames, rowStep);
+        });
+      }, WALK_FRAME_MS);
+    }
+  </script>
+</body>
+</html>

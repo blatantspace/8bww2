@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Battlegrounds</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --ink: #1c1712;
+      --muted: #5e584e;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      background: #ffffff;
+      color: var(--ink);
+    }
+
+    body {
+      min-height: 100vh;
+      font-family: "IBM Plex Mono", ui-monospace, "Courier New", monospace;
+    }
+
+    .wrap {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 24px 48px;
+    }
+
+    a { color: var(--ink); }
+
+    .kicker {
+      font-family: "Press Start 2P", "Courier New", monospace;
+      font-size: 10px;
+      line-height: 1.6;
+      color: var(--muted);
+      margin: 0 0 14px;
+    }
+
+    .kicker a { color: var(--muted); }
+
+    h1 {
+      font-family: "Press Start 2P", "Courier New", monospace;
+      font-size: 22px;
+      font-weight: 400;
+      line-height: 1.45;
+      margin: 0 0 10px;
+    }
+
+    .deck {
+      max-width: 40rem;
+      margin: 0 0 28px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.55;
+    }
+
+    canvas {
+      image-rendering: crisp-edges;
+      image-rendering: pixelated;
+      display: block;
+    }
+
+    .hang {
+      display: flex;
+      flex-direction: column;
+      gap: 36px;
+    }
+
+    .cloth {
+      text-decoration: none;
+      color: inherit;
+      display: block;
+    }
+
+    .frame {
+      display: inline-block;
+      padding: 10px;
+      border: 1px solid var(--ink);
+      background: #f7f4ee;
+    }
+
+    .cloth canvas {
+      width: 768px;
+      max-width: 100%;
+      height: auto;
+    }
+
+    .who {
+      margin: 10px 0 0;
+      font-family: "Press Start 2P", "Courier New", monospace;
+      font-size: 8px;
+      line-height: 1.6;
+    }
+
+    .line {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      max-width: 40rem;
+    }
+
+    .cloth:hover .frame,
+    .cloth:focus-visible .frame {
+      outline: 1px solid var(--ink);
+      outline-offset: 3px;
+    }
+
+    .foot {
+      margin: 36px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    @media (max-width: 720px) {
+      .wrap { padding: 20px 12px 36px; }
+      h1 { font-size: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <p class="kicker">For a small game · <a href="index.html">The company</a> · <a href="stage.html">Empty stage</a> · <a href="juno.html">Juno Beach</a></p>
+    <h1>Battlegrounds</h1>
+    <p class="deck">Pixel tapestries of the ground they stood on. The further back a thing sits, the more the air takes it. Click one to walk it.</p>
+    <div class="hang" id="hang"></div>
+    <p class="foot">Blatant Space.</p>
+  </div>
+
+  <script src="grounds.js"></script>
+  <script>
+    const { grounds, blit, W, H, ground } = window.PIXEL_GROUNDS;
+    const hang = document.getElementById("hang");
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const canvases = [];
+
+    function paintCloth(canvas, land, tick) {
+      const ctx = canvas.getContext("2d");
+      const img = ctx.createImageData(canvas.width, canvas.height);
+      blit(img, canvas.width, canvas.height, land, {
+        camX: Math.floor(tick / 18),
+        drift: Math.floor(tick / 10),
+        frame: Math.floor(tick / 6) % 4,
+        pin: ground,
+      });
+      ctx.putImageData(img, 0, 0);
+    }
+
+    grounds.forEach(function (land) {
+      const link = document.createElement("a");
+      link.className = "cloth";
+      link.href = "stage.html?ground=" + encodeURIComponent(land.id);
+      const frame = document.createElement("div");
+      frame.className = "frame";
+      const canvas = document.createElement("canvas");
+      canvas.width = W;
+      canvas.height = H;
+      canvas._land = land;
+      paintCloth(canvas, land, 0);
+      const who = document.createElement("div");
+      who.className = "who";
+      who.textContent = land.name;
+      const line = document.createElement("p");
+      line.className = "line";
+      line.textContent = land.line;
+      frame.append(canvas);
+      link.append(frame, who, line);
+      hang.append(link);
+      canvases.push(canvas);
+    });
+
+    if (!reduceMotion) {
+      let tick = 0;
+      window.setInterval(function () {
+        tick += 1;
+        canvases.forEach(function (canvas) {
+          paintCloth(canvas, canvas._land, tick);
+        });
+      }, 160);
+    }
+  </script>
+</body>
+</html>

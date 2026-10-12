@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Juno Beach</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --ink: #1c1712;
+      --paper: #f4efe4;
+      --muted: #5e584e;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      background: #e8e2d4;
+      color: var(--ink);
+    }
+
+    body {
+      min-height: 100vh;
+      font-family: "IBM Plex Mono", ui-monospace, "Courier New", monospace;
+    }
+
+    a { color: var(--ink); }
+
+    .wrap {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 28px 20px 56px;
+    }
+
+    .kicker {
+      font-family: "Press Start 2P", "Courier New", monospace;
+      font-size: 10px;
+      line-height: 1.6;
+      color: var(--muted);
+      margin: 0 0 16px;
+    }
+
+    .kicker a { color: var(--muted); }
+
+    h1 {
+      font-family: "Press Start 2P", "Courier New", monospace;
+      font-size: 22px;
+      font-weight: 400;
+      line-height: 1.45;
+      margin: 0 0 14px;
+    }
+
+    .deck {
+      max-width: 40rem;
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.55;
+    }
+
+    .count {
+      margin: 0 0 18px;
+      font-size: 16px;
+      line-height: 1.5;
+    }
+
+    .beach-wrap {
+      overflow: auto;
+      background: #6a8aaa;
+      border: 1px solid #1c1712;
+    }
+
+    canvas {
+      display: block;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+
+    .foot {
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 720px) {
+      .wrap { padding: 20px 12px 40px; }
+      h1 { font-size: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <p class="kicker"><a href="index.html">The shelf</a> · <a href="stage.html">Empty stage</a> · <a href="grounds.html">Battlegrounds</a> · Juno Beach · 6 June 1944</p>
+    <h1>Juno Beach</h1>
+    <p class="deck">21,400 men came ashore here. Each figure is one of them. The sprites are small so the whole landing fits. Sea is at the top. They walk inland, toward the villages.</p>
+    <p class="count" id="count">Drawing the landing.</p>
+    <div class="beach-wrap">
+      <canvas id="beach" width="3200" height="720"></canvas>
+    </div>
+    <p class="foot">About 14,000 were Canadian. The rest were British. A thin German line waits in the grass. Same figures as the shelf, just smaller. Blatant Space.</p>
+  </div>
+
+  <script src="sprites.js"></script>
+  <script>
+    const { palette, crew } = window.PIXEL_CREW;
+    const canvas = document.getElementById("beach");
+    const countEl = document.getElementById("count");
+    const ctx = canvas.getContext("2d");
+    const BW = canvas.width;
+    const BH = canvas.height;
+    const STEP = 3;
+    const LANDING = 21400;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    const WATER = 100;
+    const SURF = 140;
+    const WET = 270;
+    const SAND = 500;
+    const GRASS = 620;
+
+    function byName(name) {
+      const found = crew.find(function (person) { return person.name === name; });
+      if (!found) throw new Error("missing " + name);
+      return found;
+    }
+
+    function boundsOf(frames) {
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -1;
+      let maxY = -1;
+      frames.forEach(function (rows) {
+        rows.forEach(function (row, y) {
+          for (let x = 0; x < row.length; x++) {
+            if (row[x] === ".") continue;
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+          }
+        });
+      });
+      return { minX: minX, minY: minY, maxX: maxX, maxY: maxY };
+    }
+
+    function cropRows(rows, box) {
+      const out = [];
+      for (let y = box.minY; y <= box.maxY; y++) {
+        out.push(rows[y].slice(box.minX, box.maxX + 1));
+      }
+      return out;
+    }
+
+    function shrink(rows, step) {
+      const h = Math.max(1, Math.floor(rows.length / step));
+      const w = Math.max(1, Math.floor(rows[0].length / step));
+      const out = [];
+      for (let y = 0; y < h; y++) {
+        let line = "";
+        for (let x = 0; x < w; x++) line += rows[y * step][x * step];
+        out.push(line);
+      }
+      return out;
+    }
+
+    function rowsToStamp(rows) {
+      const w = rows[0].length;
+      const h = rows.length;
+      const data = new Uint8ClampedArray(w * h * 4);
+      for (let y = 0; y < h; y++) {
+        const row = rows[y];
+        for (let x = 0; x < w; x++) {
+          const ch = row[x];
+          if (ch === ".") continue;
+          const hex = palette[ch] || "#ff00ff";
+          const n = parseInt(hex.slice(1), 16);
+          const i = (y * w + x) * 4;
+          data[i] = (n >> 16) & 255;
+          data[i + 1] = (n >> 8) & 255;
+          data[i + 2] = n & 255;
+          data[i + 3] = 255;
+        }
+      }
+      return { w: w, h: h, data: data };
+    }
+
+    function tinySet(person, keys) {
+      const box = boundsOf(keys.reduce(function (all, key) {
+        return all.concat(person[key]);
+      }, []));
+      const set = {};
+      keys.forEach(function (key) {
+        set[key] = person[key].map(function (rows) {
+          return rowsToStamp(shrink(cropRows(rows, box), STEP));
+        });
+      });
+      return set;
+    }
+
+    const kinds = {
+      rifle: tinySet(byName("British Army"), ["stand", "forward"]),
+      medic: tinySet(byName("Medic"), ["stand", "forward"]),
+      tank: tinySet(byName("Sherman"), ["stand", "forward"]),
+      gun: tinySet(byName("25-Pounder"), ["stand", "forward"]),
+      mg: tinySet(byName("Browning"), ["stand", "forward"]),
+      german: tinySet(byName("Wehrmacht"), ["stand"]),
+      pak: tinySet(byName("Pak 40"), ["stand"]),
+      mg42: tinySet(byName("MG 42"), ["stand"]),
+    };
+
+    function rand(seed) {
+      let x = (seed * 374761393 + 668265263) >>> 0;
+      x = Math.imul(x ^ (x >>> 13), 1274126177);
+      return ((x ^ (x >>> 16)) >>> 0) / 4294967296;
+    }
+
+    function place(kind, n, y0, y1, start) {
+      const list = [];
+      for (let i = 0; i < n; i++) {
+        const a = rand(start + i * 3);
+        const b = rand(start + i * 3 + 1);
+        const c = rand(start + i * 3 + 2);
+        const westClump = a < 0.42 ? 0.18 : a < 0.78 ? 0.52 : 0.82;
+        const x = Math.floor((westClump + (b - 0.5) * 0.28) * BW);
+        list.push({
+          kind: kind,
+          x: Math.max(8, Math.min(BW - 8, x)),
+          y: Math.floor(y0 + c * (y1 - y0)),
+          frame: Math.floor(a * 8),
+          halt: y1 + Math.floor(b * 24),
+        });
+      }
+      return list;
+    }
+
+    const landing = []
+      .concat(place("rifle", 14800, SURF - 10, WET + 20, 1))
+      .concat(place("rifle", 5650, WET, SAND - 20, 20000))
+      .concat(place("medic", 500, WET, SAND - 40, 40000))
+      .concat(place("tank", 190, SURF + 10, WET + 40, 50000))
+      .concat(place("gun", 48, WET + 20, SAND - 80, 60000))
+      .concat(place("mg", 212, WET, SAND - 60, 70000));
+
+    if (landing.length !== LANDING) {
+      countEl.textContent = "Count is off. " + landing.length + " not " + LANDING + ".";
+    }
+
+    const germans = []
+      .concat(place("german", 400, GRASS - 30, BH - 20, 80000))
+      .concat(place("mg42", 36, GRASS - 10, GRASS + 40, 90000))
+      .concat(place("pak", 8, GRASS, GRASS + 30, 95000));
+
+    const people = landing.concat(germans);
+
+    const ground = ctx.createImageData(BW, BH);
+
+    function fillBand(img, y0, y1, r, g, b) {
+      for (let y = y0; y < y1; y++) {
+        for (let x = 0; x < BW; x++) {
+          const n = rand(x * 13 + y * 17);
+          const i = (y * BW + x) * 4;
+          img.data[i] = r + Math.floor((n - 0.5) * 14);
+          img.data[i + 1] = g + Math.floor((n - 0.4) * 12);
+          img.data[i + 2] = b + Math.floor((n - 0.5) * 10);
+          img.data[i + 3] = 255;
+        }
+      }
+    }
+
+    function house(img, x, y, w, h, r, g, b) {
+      for (let j = 0; j < h; j++) {
+        for (let i = 0; i < w; i++) {
+          const px = x + i;
+          const py = y + j;
+          if (px < 0 || py < 0 || px >= BW || py >= BH) continue;
+          const o = (py * BW + px) * 4;
+          const roof = j < 3;
+          img.data[o] = roof ? 70 : r;
+          img.data[o + 1] = roof ? 58 : g;
+          img.data[o + 2] = roof ? 48 : b;
+          img.data[o + 3] = 255;
+        }
+      }
+    }
+
+    function paintGround() {
+      fillBand(ground, 0, WATER, 82, 114, 146);
+      fillBand(ground, WATER, SURF, 214, 214, 208);
+      fillBand(ground, SURF, WET, 176, 158, 116);
+      fillBand(ground, WET, SAND, 210, 193, 154);
+      fillBand(ground, SAND, GRASS, 122, 132, 88);
+      fillBand(ground, GRASS, BH, 92, 98, 70);
+      const villages = [
+        [420, GRASS + 8, 28, 18],
+        [980, GRASS + 16, 36, 22],
+        [1680, GRASS + 10, 40, 20],
+        [2460, GRASS + 14, 32, 18],
+      ];
+      villages.forEach(function (v) {
+        house(ground, v[0], v[1], v[2], v[3], 110, 96, 78);
+        house(ground, v[0] + 22, v[1] + 6, 14, 12, 96, 86, 70);
+      });
+      for (let i = 0; i < 90; i++) {
+        const x = Math.floor(rand(i * 91) * BW);
+        const y = SURF + Math.floor(rand(i * 91 + 3) * 28);
+        const o = (y * BW + x) * 4;
+        ground.data[o] = 40;
+        ground.data[o + 1] = 40;
+        ground.data[o + 2] = 40;
+        ground.data[o + 3] = 255;
+      }
+    }
+
+    function stamp(img, src, dx, dy) {
+      const sw = src.w;
+      const sh = src.h;
+      const data = src.data;
+      for (let y = 0; y < sh; y++) {
+        const ty = dy + y;
+        if (ty < 0 || ty >= BH) continue;
+        for (let x = 0; x < sw; x++) {
+          const i = (y * sw + x) * 4;
+          if (data[i + 3] < 128) continue;
+          const tx = dx + x;
+          if (tx < 0 || tx >= BW) continue;
+          const o = (ty * BW + tx) * 4;
+          img.data[o] = data[i];
+          img.data[o + 1] = data[i + 1];
+          img.data[o + 2] = data[i + 2];
+          img.data[o + 3] = 255;
+        }
+      }
+    }
+
+    const frame = ctx.createImageData(BW, BH);
+
+    function draw(tick) {
+      frame.data.set(ground.data);
+      const walk = tick % 8;
+      people.sort(function (a, b) { return a.y - b.y; });
+      for (let i = 0; i < people.length; i++) {
+        const p = people[i];
+        const set = kinds[p.kind];
+        const moving = p.kind === "rifle" || p.kind === "medic" || p.kind === "tank" || p.kind === "gun" || p.kind === "mg";
+        const frames = moving ? set.forward : set.stand;
+        const src = frames[(p.frame + (moving ? walk : 0)) % frames.length];
+        stamp(frame, src, p.x - Math.floor(src.w / 2), p.y - src.h);
+      }
+      ctx.putImageData(frame, 0, 0);
+    }
+
+    paintGround();
+    draw(0);
+    countEl.textContent = LANDING.toLocaleString("en-CA") + " ashore. One sprite each. Plus a thin German line inland.";
+
+    let tick = 0;
+    let last = 0;
+    if (!reduceMotion) {
+      function loop(now) {
+        if (now - last > 160) {
+          tick += 1;
+          last = now;
+          for (let i = 0; i < landing.length; i++) {
+            const p = landing[i];
+            if (p.y < SAND + 80) p.y += 1;
+          }
+          draw(tick);
+        }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    }
+
+    function fit() {
+      const max = Math.min(1080, document.querySelector(".wrap").clientWidth);
+      canvas.style.width = max + "px";
+      canvas.style.height = Math.round(BH * (max / BW)) + "px";
+    }
+    fit();
+    window.addEventListener("resize", fit);
+  </script>
+</body>
+</html>

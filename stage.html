@@ -1,0 +1,1284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stage</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #ffffff;
+      overflow: hidden;
+    }
+
+    a {
+      position: fixed;
+      top: 12px;
+      left: 14px;
+      z-index: 2;
+      font: 12px/1.4 "IBM Plex Mono", ui-monospace, "Courier New", monospace;
+      color: #9a948a;
+      text-decoration: none;
+    }
+
+    a:hover { color: #1c1712; }
+
+    .hint,
+    .score {
+      position: fixed;
+      right: 14px;
+      z-index: 2;
+      margin: 0;
+      font: 12px/1.4 "IBM Plex Mono", ui-monospace, "Courier New", monospace;
+      color: #9a948a;
+    }
+
+    .hint { top: 12px; }
+    .score { top: 30px; }
+
+    #field {
+      position: fixed;
+      inset: 0;
+      background: #ffffff;
+      overflow: hidden;
+    }
+
+    #field.depth {
+      perspective: 720px;
+      perspective-origin: 50% 62%;
+    }
+
+    #world {
+      display: none;
+      position: absolute;
+      left: 50%;
+      top: 62%;
+      transform-style: preserve-3d;
+      will-change: transform;
+    }
+
+    #field.depth #world { display: block; }
+
+    #world .plane,
+    #world .shot,
+    #world .flash,
+    #world .hero {
+      position: absolute;
+      left: 0;
+      top: 0;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      backface-visibility: hidden;
+      pointer-events: none;
+    }
+
+    .hero {
+      position: absolute;
+      left: 0;
+      top: 0;
+      z-index: 1;
+      margin: 0;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      display: block;
+    }
+
+    #field.depth .hero {
+      z-index: auto;
+    }
+  </style>
+</head>
+<body>
+  <a href="index.html">Shelf</a>
+  <p class="hint">arrows + space · x jump · c prone</p>
+  <p class="score" id="score"></p>
+  <div id="field">
+    <div id="world"></div>
+    <canvas id="hero" class="hero" width="40" height="36"></canvas>
+    <canvas id="hero2" class="hero" width="40" height="36"></canvas>
+  </div>
+
+  <script src="sprites.js"></script>
+  <script src="grounds.js"></script>
+  <script>
+    const { palette, crew, ground, mid, idle } = window.PIXEL_CREW;
+    const field = document.getElementById("field");
+    const world = document.getElementById("world");
+    const params = new URLSearchParams(location.search);
+    const groundsPack = window.PIXEL_GROUNDS;
+    const land = groundsPack && groundsPack.grounds.find(function (item) {
+      return item.id === params.get("ground");
+    });
+    const paintLayer = groundsPack && groundsPack.paintLayer;
+    const planeCanvases = [];
+    const TILES = 5;
+    const CAM_FOLLOW = 0.18;
+    const Z_PER_Y = 0.4;
+    const Z_BACK = 9;
+    const Z_FWD = 4;
+    const SHOT_MS = 140;
+    const SHOT_LIFE = 520;
+    const SHOT_SPEED = 240;
+    const RECOIL_SNAP = 85;
+    const RECOIL_SETTLE = 70;
+    const RECOIL_TOTAL = RECOIL_SNAP + RECOIL_SETTLE;
+    const SCALE = 8;
+    const WALK_FRAME_MS = 80;
+    const JUMP_FRAME_MS = 70;
+    const CRAWL_FRAME_MS = 110;
+    const CRAWL_SPEED = 0.45;
+    const BASE_SPEED = 32;
+    const SPEED_STEP = 4;
+    const SHIFT_MULT = 4;
+    const WIND_AFTER = 96;
+    const IDLE_MODES = ["mix", "still", "glance", "arms"];
+    const START_GAP = 22;
+    const HOME_HP = 3;
+    const HIT_MS = 160;
+    const DOWN_MS = 1200;
+    const HIT_LANE = 8;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const PAIR = {
+      "Marines": "Wehrmacht",
+      "US General": "German General",
+      "Churchill": "Hitler",
+      "Roosevelt": "Hitler",
+      "Stalin": "Hitler",
+      "British Army": "Wehrmacht",
+      "Red Army": "German SMG",
+      "Wehrmacht": "Marines",
+      "German General": "US General",
+      "Hitler": "Churchill",
+      "Japanese Army": "Marines",
+      "German SMG": "Red Army",
+      "Medic": "German Medic",
+      "Paratrooper": "Fallschirmjäger",
+      "Pilot": "Luftwaffe",
+      "German Medic": "Medic",
+      "Fallschirmjäger": "Paratrooper",
+      "Luftwaffe": "Pilot",
+      "Sherman": "Panzer IV",
+      "25-Pounder": "Pak 40",
+      "Browning": "MG 42",
+      "Panzer IV": "Sherman",
+      "Pak 40": "25-Pounder",
+      "MG 42": "Browning",
+    };
+
+    function findCrew(name, fallback) {
+      let i = crew.findIndex(function (person) { return person.name === name; });
+      if (i < 0) i = fallback;
+      if (i < 0) i = 0;
+      return i;
+    }
+
+    function campOf(person) {
+      return person.line && person.line.indexOf("Axis") === 0 ? "axis" : "allies";
+    }
+
+    function firstOn(camp, start) {
+      if (campOf(crew[start]) === camp) return start;
+      for (let i = 0; i < crew.length; i++) {
+        if (campOf(crew[i]) === camp) return i;
+      }
+      return start;
+    }
+
+    function nextOn(from, dir, camp) {
+      let i = from;
+      for (let n = 0; n < crew.length; n++) {
+        i = (i + dir + crew.length) % crew.length;
+        if (campOf(crew[i]) === camp) return i;
+      }
+      return from;
+    }
+
+    function isArmed(person) {
+      if (person.vkind) return true;
+      const w = (person.weapon || "").toLowerCase();
+      if (!w || w === "none") return false;
+      if (w.indexOf("baton") >= 0 || w.indexOf("binoc") >= 0) return false;
+      if (w.indexOf("cigar") >= 0 || w.indexOf("holder") >= 0 || w.indexOf("pipe") >= 0) return false;
+      return true;
+    }
+
+    function shotFeel(person) {
+      if (person.vkind === "tank" || person.vkind === "gun") {
+        return { cool: 280, speed: 320, life: 720 };
+      }
+      if (person.vkind === "mg") {
+        return { cool: 70, speed: 260, life: 500 };
+      }
+      return { cool: SHOT_MS, speed: SHOT_SPEED, life: SHOT_LIFE };
+    }
+
+    const wanted = params.get("name") || "Marines";
+    const pick = findCrew(wanted, 0);
+    const pairName = params.get("name2") || PAIR[crew[pick].name];
+    const pair = findCrew(pairName, campOf(crew[pick]) === "axis" ? 0 : findCrew("Wehrmacht", 1));
+    const good = campOf(crew[pick]) === "axis" ? firstOn("allies", pair) : firstOn("allies", pick);
+    const bad = campOf(crew[pick]) === "axis" ? firstOn("axis", pick) : firstOn("axis", pair);
+
+    function boundsOf(frames) {
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -1;
+      let maxY = -1;
+      frames.forEach(function (rows) {
+        rows.forEach(function (row, y) {
+          for (let x = 0; x < row.length; x++) {
+            if (row[x] === ".") continue;
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+          }
+        });
+      });
+      return { minX: minX, minY: minY, maxX: maxX, maxY: maxY };
+    }
+
+    function crop(frames, box) {
+      return frames.map(function (rows) {
+        const out = [];
+        for (let y = box.minY; y <= box.maxY; y++) out.push(rows[y].slice(box.minX, box.maxX + 1));
+        return out;
+      });
+    }
+
+    function cropAll(sets) {
+      const keys = ["stand", "standRight", "forward", "right", "left"];
+      if (sets.recoil) {
+        keys.push(
+          "recoil", "recoilRight", "recoilFront",
+          "recoilForward", "recoilForwardSettle",
+          "recoilRightWalk", "recoilRightWalkSettle",
+          "recoilLeftWalk", "recoilLeftWalkSettle"
+        );
+      }
+      if (sets.jump) {
+        keys.push("jump", "jumpRight", "prone", "proneRight", "crawl", "crawlRight");
+      }
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -1;
+      let maxY = -1;
+      keys.forEach(function (key) {
+        const box = boundsOf(sets[key]);
+        if (box.minX < minX) minX = box.minX;
+        if (box.minY < minY) minY = box.minY;
+        if (box.maxX > maxX) maxX = box.maxX;
+        if (box.maxY > maxY) maxY = box.maxY;
+      });
+      const box = {
+        minX: Math.max(0, minX - 1),
+        minY: Math.max(0, minY - 1),
+        maxX: Math.min(sets.forward[0][0].length - 1, maxX + 1),
+        maxY: Math.min(sets.forward[0].length - 1, maxY + 1),
+      };
+      const view = {
+        anchorX: mid - box.minX,
+        anchorY: ground - box.minY,
+      };
+      keys.forEach(function (key) {
+        view[key] = crop(sets[key], box);
+      });
+      return view;
+    }
+
+    const views = crew.map(function (person) {
+      return cropAll(person);
+    });
+
+    function extras(key) {
+      if (key === "sky") return { extraTop: 80, extraBot: 24 };
+      if (key === "ground" || key === "near") return { extraTop: 18, extraBot: 90 };
+      return { extraTop: 18, extraBot: 24 };
+    }
+
+    function makeShadow() {
+      const shade = document.createElement("canvas");
+      shade.className = "plane";
+      shade.width = 9;
+      shade.height = 3;
+      shade._shadow = true;
+      shade._z = -1;
+      const sctx = shade.getContext("2d");
+      sctx.fillStyle = "rgba(28,30,28,0.35)";
+      sctx.fillRect(1, 1, 7, 1);
+      sctx.fillStyle = "rgba(28,30,28,0.2)";
+      sctx.fillRect(2, 0, 5, 1);
+      sctx.fillRect(2, 2, 5, 1);
+      shade.style.width = shade.width * SCALE + "px";
+      shade.style.height = shade.height * SCALE + "px";
+      return shade;
+    }
+
+    function makeActor(canvas, index, keys, side) {
+      return {
+        canvas: canvas,
+        shadow: makeShadow(),
+        flashEl: null,
+        keys: keys,
+        side: side,
+        index: index,
+        view: views[index],
+        mode: "stand",
+        animFrame: 0,
+        animAcc: 0,
+        standAtRest: true,
+        standHold: 480,
+        walked: 0,
+        winded: 0,
+        breathIn: true,
+        idleMode: 0,
+        moveX: 0,
+        moveY: 0,
+        footX: 0,
+        footY: 0,
+        facing: side > 0 ? "left" : "right",
+        horiz: 0,
+        shotCool: 0,
+        flashMs: 0,
+        recoilMs: 0,
+        hp: HOME_HP,
+        hitMs: 0,
+        downMs: 0,
+        ai: false,
+        aiX: 0,
+        aiY: 0,
+        aiFire: false,
+        aiAim: 0,
+        aiSidestep: 0,
+        aiStrafe: 0,
+        jumping: false,
+        prone: false,
+        airX: 0,
+      };
+    }
+
+    const actors = [
+      makeActor(document.getElementById("hero"), good, {
+        left: "ArrowLeft",
+        right: "ArrowRight",
+        up: "ArrowUp",
+        down: "ArrowDown",
+        fire: "space",
+        jump: "x",
+        prone: "c",
+      }, -1),
+      makeActor(document.getElementById("hero2"), bad, {
+        left: "a",
+        right: "d",
+        up: "w",
+        down: "s",
+        fire: "f",
+        jump: "v",
+        prone: "b",
+      }, 1),
+    ];
+    actors[1].ai = true;
+
+    let landFrame = 0;
+    let landAcc = 0;
+    let cloudDrift = 0;
+    let placed = false;
+    let speed = BASE_SPEED;
+    let shiftHeld = false;
+    const shots = [];
+    const held = {};
+
+    function setTitle() {
+      const names = actors.map(function (actor) { return crew[actor.index].name; }).join(" · ");
+      document.title = names + (land ? " · " + land.name : "");
+    }
+
+    function ticks(n) {
+      let out = "";
+      for (let i = 0; i < HOME_HP; i++) out += i < n ? "x" : "-";
+      return out;
+    }
+
+    function updateScore() {
+      const goodName = crew[actors[0].index].name;
+      const badName = crew[actors[1].index].name;
+      document.getElementById("score").textContent = goodName + " " + ticks(actors[0].hp) + "  " + badName + " " + ticks(actors[1].hp);
+    }
+
+    function buildPlanes() {
+      if (!land || !paintLayer) return;
+      field.classList.add("depth");
+      const hex = (groundsPack.palette[land.sky] || "#ffffff");
+      field.style.background = hex;
+      world.innerHTML = "";
+      planeCanvases.length = 0;
+      groundsPack.depths.forEach(function (depth) {
+        const canvas = document.createElement("canvas");
+        canvas.className = "plane";
+        canvas._key = depth.key;
+        canvas._z = depth.z;
+        const pad = extras(depth.key);
+        canvas._pad = pad;
+        world.append(canvas);
+        planeCanvases.push(canvas);
+      });
+      actors.forEach(function (actor) {
+        actor.shadow.remove();
+        actor.canvas.remove();
+        world.append(actor.shadow);
+        world.append(actor.canvas);
+      });
+      paintPlanes();
+      posePlanes();
+    }
+
+    function paintPlanes() {
+      if (!land) return;
+      planeCanvases.forEach(function (canvas) {
+        const pad = canvas._pad;
+        paintLayer(canvas, land, canvas._key, {
+          tiles: TILES,
+          extraTop: pad.extraTop,
+          extraBot: pad.extraBot,
+          frame: landFrame,
+          drift: Math.floor(cloudDrift),
+        });
+        canvas.style.width = canvas.width * SCALE + "px";
+        canvas.style.height = canvas.height * SCALE + "px";
+      });
+    }
+
+    function origin() {
+      return {
+        x: Math.floor(field.clientWidth / SCALE / 2),
+        y: Math.floor(field.clientHeight / SCALE * 0.62),
+      };
+    }
+
+    function depthFromY(footY, oy) {
+      const z = (footY - oy) * Z_PER_Y;
+      if (z > Z_FWD) return Z_FWD;
+      if (z < -Z_BACK) return -Z_BACK;
+      return z;
+    }
+
+    function camX() {
+      return Math.round((actors[0].footX + actors[1].footX) / 2);
+    }
+
+    function poseActorLand(actor) {
+      const o = origin();
+      const dx = actor.footX - o.x;
+      const dy = actor.footY - o.y;
+      const z = depthFromY(actor.footY, o.y);
+      actor.canvas.style.left = "0px";
+      actor.canvas.style.top = "0px";
+      actor.canvas.style.transform = "translate3d(" + ((dx - actor.view.anchorX) * SCALE) + "px, " + ((dy - actor.view.anchorY) * SCALE) + "px, " + (z * SCALE) + "px)";
+      actor.shadow.style.transform = "translate3d(" + ((dx - 4) * SCALE) + "px, " + ((dy - 1) * SCALE) + "px, " + ((z - 1) * SCALE) + "px)";
+    }
+
+    function posePlanes() {
+      if (!land) return;
+      const o = origin();
+      world.style.transform = "translate3d(" + (-(camX() - o.x) * CAM_FOLLOW * SCALE) + "px, 0px, 0px)";
+      planeCanvases.forEach(function (canvas) {
+        const dispW = canvas.width * SCALE;
+        const groundY = canvas._pad.extraTop + groundsPack.ground;
+        canvas.style.transform = "translate3d(" + (-dispW / 2) + "px, " + (-groundY * SCALE) + "px, " + (canvas._z * SCALE) + "px)";
+      });
+      actors.forEach(poseActorLand);
+    }
+
+    function paintLand() {
+      if (!land) return;
+      if (!planeCanvases.length) buildPlanes();
+      else {
+        paintPlanes();
+        posePlanes();
+      }
+    }
+
+    function paint(canvas, frames, frame) {
+      const rows = frames[frame % frames.length];
+      const ctx = canvas.getContext("2d");
+      const img = ctx.createImageData(canvas.width, canvas.height);
+      for (let y = 0; y < canvas.height; y++) {
+        const row = rows[y];
+        for (let x = 0; x < row.length; x++) {
+          const ch = row[x];
+          if (ch === ".") continue;
+          const hex = palette[ch] || "#ff00ff";
+          const n = parseInt(hex.slice(1), 16);
+          const i = (y * canvas.width + x) * 4;
+          img.data[i] = (n >> 16) & 255;
+          img.data[i + 1] = (n >> 8) & 255;
+          img.data[i + 2] = n & 255;
+          img.data[i + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+    }
+
+    function makeShotCanvas() {
+      const canvas = document.createElement("canvas");
+      canvas.className = "shot";
+      canvas.width = 4;
+      canvas.height = 2;
+      const ctx = canvas.getContext("2d");
+      const img = ctx.createImageData(4, 2);
+      function pix(x, y, hex) {
+        const n = parseInt(hex.slice(1), 16);
+        const i = (y * 4 + x) * 4;
+        img.data[i] = (n >> 16) & 255;
+        img.data[i + 1] = (n >> 8) & 255;
+        img.data[i + 2] = n & 255;
+        img.data[i + 3] = 255;
+      }
+      pix(0, 0, "#b8a57a");
+      pix(1, 0, "#1c1e1c");
+      pix(2, 0, "#1c1e1c");
+      pix(3, 0, "#b7b1a4");
+      pix(1, 1, "#32373b");
+      ctx.putImageData(img, 0, 0);
+      canvas.style.width = 4 * SCALE + "px";
+      canvas.style.height = 2 * SCALE + "px";
+      return canvas;
+    }
+
+    function makeFlashCanvas() {
+      const canvas = document.createElement("canvas");
+      canvas.className = "flash";
+      canvas.width = 5;
+      canvas.height = 3;
+      const ctx = canvas.getContext("2d");
+      const img = ctx.createImageData(5, 3);
+      function pix(x, y, hex) {
+        const n = parseInt(hex.slice(1), 16);
+        const i = (y * 5 + x) * 4;
+        img.data[i] = (n >> 16) & 255;
+        img.data[i + 1] = (n >> 8) & 255;
+        img.data[i + 2] = n & 255;
+        img.data[i + 3] = 255;
+      }
+      pix(2, 1, "#b7b1a4");
+      pix(1, 1, "#b8a57a");
+      pix(3, 1, "#b8a57a");
+      pix(2, 0, "#b8a57a");
+      pix(2, 2, "#b8a57a");
+      ctx.putImageData(img, 0, 0);
+      canvas.style.width = 5 * SCALE + "px";
+      canvas.style.height = 3 * SCALE + "px";
+      return canvas;
+    }
+
+    actors.forEach(function (actor) {
+      actor.flashEl = makeFlashCanvas();
+    });
+
+    function firingAim(actor) {
+      if (actor.mode === "right" || actor.facing === "right") return "right";
+      if (actor.mode === "left" || actor.facing === "left") return "left";
+      if (actor.mode === "back") return "back";
+      return "forward";
+    }
+
+    function recoilMuzzleKey(actor) {
+      const settle = actor.recoilMs <= RECOIL_SETTLE;
+      if (actor.mode === "right") return settle ? "recoilRightWalkSettle" : "recoilRightWalk";
+      if (actor.mode === "left") return settle ? "recoilLeftWalkSettle" : "recoilLeftWalk";
+      if (actor.mode === "stand") return actor.facing === "right" ? "recoilRight" : "recoil";
+      return settle ? "recoilForwardSettle" : "recoilForward";
+    }
+
+    function muzzleKey(actor) {
+      if (actor.recoilMs > 0 && crew[actor.index].muzzles) return recoilMuzzleKey(actor);
+      if (actor.jumping) return actor.facing === "right" ? "jumpRight" : "jump";
+      if (actor.prone) {
+        const moving = axes(actor).x !== 0 || axes(actor).y !== 0;
+        if (moving) return actor.facing === "right" ? "crawlRight" : "crawl";
+        return actor.facing === "right" ? "proneRight" : "prone";
+      }
+      if (actor.mode === "right") return "right";
+      if (actor.mode === "left") return "left";
+      if (actor.mode === "stand") return actor.facing === "right" ? "standRight" : "stand";
+      return "forward";
+    }
+
+    function muzzle(actor) {
+      const o = land ? origin() : { x: 0, y: 0 };
+      const z = land ? depthFromY(actor.footY, o.y) : 0;
+      const person = crew[actor.index];
+      const tips = person.muzzles && person.muzzles[muzzleKey(actor)];
+      const tip = tips && tips[shownFrame(actor) % tips.length];
+      let ox = 0;
+      let oy = -14;
+      if (tip) {
+        ox = tip.x - mid;
+        oy = tip.y - ground;
+      }
+      let vx = 0;
+      let vy = 0;
+      let vz = 0;
+      const aim = firingAim(actor);
+      const feel = shotFeel(person);
+      if (aim === "right") vx = feel.speed;
+      else if (aim === "left") vx = -feel.speed;
+      else if (aim === "back") {
+        vy = Math.round(feel.speed * 0.35);
+        vz = Math.round(feel.speed * 0.45);
+      } else {
+        vy = -Math.round(feel.speed * 0.4);
+        vz = -Math.round(feel.speed * 0.55);
+      }
+      return {
+        x: actor.footX + ox,
+        y: actor.footY + oy,
+        z: z + 1,
+        vx: vx,
+        vy: vy,
+        vz: vz,
+        left: aim === "left",
+      };
+    }
+
+    function fireShot(actor) {
+      if (actor.shotCool > 0 || actor.downMs > 0 || actor.hitMs > 0) return;
+      if (!isArmed(crew[actor.index])) return;
+      const feel = shotFeel(crew[actor.index]);
+      actor.shotCool = feel.cool;
+      actor.flashMs = 70;
+      actor.recoilMs = RECOIL_TOTAL;
+      const m = muzzle(actor);
+      const el = makeShotCanvas();
+      (land ? world : field).append(el);
+      shots.push({
+        x: m.x,
+        y: m.y,
+        z: m.z,
+        vx: m.vx,
+        vy: m.vy,
+        vz: m.vz,
+        left: m.left,
+        life: feel.life,
+        owner: actor,
+        lane: actor.footY,
+        el: el,
+      });
+      if (!actor.flashEl.parentNode) (land ? world : field).append(actor.flashEl);
+      if (actor.ai && !humanDriving(actor)) {
+        actor.aiSidestep = 220 + Math.random() * 180;
+        actor.aiStrafe = Math.random() < 0.5 ? -1 : 1;
+        actor.aiAim = 0;
+      }
+    }
+
+    function hitBox(actor) {
+      const person = crew[actor.index];
+      const half = person.vkind ? Math.max(10, Math.floor((person.hullW || 20) / 2)) : actor.prone ? 10 : 6;
+      const tall = person.vkind ? 20 : actor.prone ? 8 : 22;
+      return {
+        left: actor.footX - half,
+        right: actor.footX + half,
+        top: actor.footY - tall,
+        bot: actor.footY - 2,
+      };
+    }
+
+    function shotHits(shot, actor) {
+      if (shot.owner === actor) return false;
+      if (actor.downMs > 0) return false;
+      if (Math.abs(actor.footY - shot.lane) > HIT_LANE) return false;
+      const box = hitBox(actor);
+      const sx = shot.left ? shot.x - 4 : shot.x;
+      return sx + 3 >= box.left && sx <= box.right && shot.y + 1 >= box.top && shot.y <= box.bot;
+    }
+
+    function applyHit(actor, shot) {
+      if (actor.downMs > 0) return;
+      actor.hp -= 1;
+      actor.hitMs = HIT_MS;
+      actor.recoilMs = 0;
+      if (shot.vx > 0) actor.footX += 2;
+      else if (shot.vx < 0) actor.footX -= 2;
+      clampFoot(actor);
+      if (actor.hp <= 0) {
+        actor.hp = 0;
+        actor.downMs = DOWN_MS;
+        actor.mode = "stand";
+        actor.moveX = 0;
+        actor.moveY = 0;
+      }
+      updateScore();
+    }
+
+    function revive(actor) {
+      actor.hp = HOME_HP;
+      actor.downMs = 0;
+      actor.hitMs = 0;
+      actor.recoilMs = 0;
+      actor.jumping = false;
+      actor.prone = false;
+      const o = origin();
+      const midY = land ? o.y : Math.floor(field.clientHeight / SCALE / 2);
+      actor.footX = o.x + actor.side * START_GAP;
+      actor.footY = midY;
+      actor.facing = actor.side > 0 ? "left" : "right";
+      actor.mode = "stand";
+      actor.animFrame = 0;
+      clampFoot(actor);
+      updateScore();
+    }
+
+    function poseShot(shot) {
+      const shift = shot.left ? -4 : 0;
+      if (land) {
+        const o = origin();
+        shot.el.style.transform = "translate3d(" + ((shot.x - o.x + shift) * SCALE) + "px, " + ((shot.y - o.y) * SCALE) + "px, " + (shot.z * SCALE) + "px)";
+        shot.el.style.left = "0px";
+        shot.el.style.top = "0px";
+      } else {
+        shot.el.style.left = (shot.x + shift) * SCALE + "px";
+        shot.el.style.top = shot.y * SCALE + "px";
+        shot.el.style.transform = "";
+      }
+    }
+
+    function poseFlash(actor) {
+      if (actor.flashMs <= 0) {
+        if (actor.flashEl.parentNode) actor.flashEl.remove();
+        return;
+      }
+      const m = muzzle(actor);
+      if (land) {
+        const o = origin();
+        actor.flashEl.style.transform = "translate3d(" + ((m.x - o.x - 2) * SCALE) + "px, " + ((m.y - o.y - 1) * SCALE) + "px, " + ((m.z + 2) * SCALE) + "px)";
+        actor.flashEl.style.left = "0px";
+        actor.flashEl.style.top = "0px";
+      } else {
+        actor.flashEl.style.left = (m.x - 2) * SCALE + "px";
+        actor.flashEl.style.top = (m.y - 1) * SCALE + "px";
+        actor.flashEl.style.transform = "";
+      }
+    }
+
+    function stepShots(dt) {
+      actors.forEach(function (actor) {
+        if (actor.shotCool > 0) actor.shotCool -= dt;
+        if (actor.flashMs > 0) actor.flashMs -= dt;
+        if (actor.recoilMs > 0) actor.recoilMs -= dt;
+        if (actor.hitMs > 0) actor.hitMs -= dt;
+        if (actor.downMs > 0) {
+          actor.downMs -= dt;
+          if (actor.downMs <= 0) revive(actor);
+        }
+        poseFlash(actor);
+      });
+      for (let i = shots.length - 1; i >= 0; i--) {
+        const shot = shots[i];
+        shot.life -= dt;
+        shot.x += shot.vx * dt / 1000;
+        shot.y += shot.vy * dt / 1000;
+        shot.z += shot.vz * dt / 1000;
+        let dead = shot.life <= 0;
+        if (!dead) {
+          for (let a = 0; a < actors.length; a++) {
+            if (shotHits(shot, actors[a])) {
+              applyHit(actors[a], shot);
+              dead = true;
+              break;
+            }
+          }
+        }
+        if (dead) {
+          shot.el.remove();
+          shots.splice(i, 1);
+          continue;
+        }
+        poseShot(shot);
+      }
+    }
+
+    function standFrames(actor) {
+      return actor.facing === "right" ? actor.view.standRight : actor.view.stand;
+    }
+
+    function hurting(actor) {
+      return actor.hitMs > 0 || actor.downMs > 0;
+    }
+
+    function canStunt(actor) {
+      const person = crew[actor.index];
+      return !!(actor.view.jump && !person.vkind && !person.chair);
+    }
+
+    function startJump(actor) {
+      if (!canStunt(actor) || actor.jumping || actor.downMs > 0 || actor.hitMs > 0) return;
+      actor.prone = false;
+      actor.jumping = true;
+      actor.animFrame = 0;
+      actor.animAcc = 0;
+      actor.airX = axes(actor).x;
+    }
+
+    function toggleProne(actor) {
+      if (!canStunt(actor) || actor.jumping || actor.downMs > 0) return;
+      actor.prone = !actor.prone;
+      actor.animFrame = 0;
+      actor.animAcc = 0;
+      actor.mode = "stand";
+    }
+
+    function activeFrames(actor) {
+      const view = actor.view;
+      if (actor.jumping && view.jump) {
+        return actor.facing === "right" ? view.jumpRight : view.jump;
+      }
+      if (actor.prone && view.prone) {
+        const moving = axes(actor).x !== 0 || axes(actor).y !== 0;
+        if (moving) return actor.facing === "right" ? view.crawlRight : view.crawl;
+        return actor.facing === "right" ? view.proneRight : view.prone;
+      }
+      if ((actor.recoilMs > 0 || hurting(actor)) && view.recoil) {
+        const settle = actor.recoilMs <= RECOIL_SETTLE;
+        if (actor.mode === "right") return settle ? view.recoilRightWalkSettle : view.recoilRightWalk;
+        if (actor.mode === "left") return settle ? view.recoilLeftWalkSettle : view.recoilLeftWalk;
+        if (actor.mode === "stand") return actor.facing === "right" ? view.recoilRight : view.recoil;
+        return settle ? view.recoilForwardSettle : view.recoilForward;
+      }
+      if (actor.mode === "right") return view.right;
+      if (actor.mode === "left") return view.left;
+      if (actor.mode === "stand") return standFrames(actor);
+      return view.forward;
+    }
+
+    function shownFrame(actor) {
+      if (actor.jumping && actor.view.jump) return actor.animFrame % actor.view.jump.length;
+      if (actor.prone && actor.view.prone) {
+        const frames = activeFrames(actor);
+        return actor.animFrame % frames.length;
+      }
+      if (hurting(actor) && actor.view.recoil) return 0;
+      if (actor.recoilMs > 0 && actor.view.recoil && actor.mode === "stand") {
+        return actor.recoilMs > RECOIL_SETTLE ? 0 : 1;
+      }
+      const frames = activeFrames(actor);
+      const n = frames.length;
+      if (actor.mode === "back") return (n - 1 - (actor.animFrame % n) + n) % n;
+      return actor.animFrame % n;
+    }
+
+    function humanDriving(actor) {
+      const keys = actor.keys;
+      return !!(held[keys.left] || held[keys.right] || held[keys.up] || held[keys.down] || held[keys.fire] || held[keys.jump] || held[keys.prone]);
+    }
+
+    function foeOf(actor) {
+      return actor === actors[0] ? actors[1] : actors[0];
+    }
+
+    function think(actor, dt) {
+      actor.aiX = 0;
+      actor.aiY = 0;
+      actor.aiFire = false;
+      if (!actor.ai || humanDriving(actor) || actor.downMs > 0 || actor.hitMs > 0) {
+        actor.aiAim = 0;
+        return;
+      }
+      const foe = foeOf(actor);
+      if (foe.downMs > 0) return;
+      const dx = foe.footX - actor.footX;
+      const dy = foe.footY - actor.footY;
+      const dist = Math.abs(dx);
+      if (dy < -1) actor.aiY = -1;
+      else if (dy > 1) actor.aiY = 1;
+      if (dist < 18) actor.aiX = dx > 0 ? -1 : 1;
+      else if (dist > 38) actor.aiX = dx > 0 ? 1 : -1;
+      if (actor.aiSidestep > 0) {
+        actor.aiSidestep -= dt;
+        actor.aiY = actor.aiStrafe || (dy < 0 ? -1 : 1);
+        actor.aiX = 0;
+      }
+      const lined = Math.abs(dy) <= 4;
+      const inRange = dist >= 14 && dist <= 64;
+      if (lined && inRange && isArmed(crew[actor.index])) {
+        actor.aiAim += dt;
+        if (actor.aiAim > 160) {
+          actor.aiFire = true;
+          actor.aiX = 0;
+          actor.aiY = 0;
+        }
+      } else {
+        actor.aiAim = 0;
+      }
+      if (actor.aiY !== 0 && actor.aiX === 0) {
+        actor.aiX = dx > 0 ? 1 : -1;
+      }
+    }
+
+    function axes(actor) {
+      if (actor.ai && !humanDriving(actor)) {
+        return { x: actor.aiX, y: actor.aiY };
+      }
+      let x = 0;
+      let y = 0;
+      if (held[actor.keys.right]) x += 1;
+      if (held[actor.keys.left]) x -= 1;
+      if (held[actor.keys.up]) y -= 1;
+      if (held[actor.keys.down]) y += 1;
+      return { x: x, y: y };
+    }
+
+    function modeFrom(x, y) {
+      if (x === 0 && y === 0) return "stand";
+      if (x !== 0) return x > 0 ? "right" : "left";
+      return y < 0 ? "forward" : "back";
+    }
+
+    function pickFidget(actor) {
+      const kind = IDLE_MODES[actor.idleMode];
+      let pool = idle.fidget;
+      if (kind === "still") return idle.still;
+      if (kind === "glance") pool = idle.glance;
+      if (kind === "arms") pool = idle.arms;
+      if (kind === "mix" && Math.random() < 0.35) return idle.still;
+      return pool[Math.floor(Math.random() * pool.length)];
+    }
+
+    function clampFoot(actor) {
+      const spanX = Math.floor(field.clientWidth / SCALE);
+      const spanY = Math.floor(field.clientHeight / SCALE);
+      const minX = actor.view.anchorX;
+      const maxX = spanX - (actor.canvas.width - actor.view.anchorX);
+      let minY = actor.view.anchorY;
+      let maxY = spanY - (actor.canvas.height - actor.view.anchorY);
+      if (land) {
+        const o = origin();
+        const top = land.walkTop || 48;
+        minY = o.y - (groundsPack.ground - top);
+        maxY = spanY - 2;
+      }
+      if (maxX < minX) actor.footX = minX;
+      else actor.footX = Math.max(minX, Math.min(maxX, actor.footX));
+      if (maxY < minY) actor.footY = minY;
+      else actor.footY = Math.max(minY, Math.min(maxY, actor.footY));
+    }
+
+    function placeActor(actor) {
+      if (land) return;
+      actor.canvas.style.left = (actor.footX - actor.view.anchorX) * SCALE + "px";
+      actor.canvas.style.top = (actor.footY - actor.view.anchorY) * SCALE + "px";
+      actor.canvas.style.transform = "";
+    }
+
+    function placeHeroes() {
+      if (land) {
+        posePlanes();
+        return;
+      }
+      actors.forEach(placeActor);
+    }
+
+    function centerFeet() {
+      const o = origin();
+      const midY = land ? o.y : Math.floor(field.clientHeight / SCALE / 2);
+      actors.forEach(function (actor) {
+        actor.footX = o.x + actor.side * START_GAP;
+        actor.footY = midY;
+      });
+      placed = true;
+    }
+
+    function dress(actor) {
+      const sample = actor.view.stand[0];
+      actor.canvas.width = sample[0].length;
+      actor.canvas.height = sample.length;
+      actor.canvas.style.width = actor.canvas.width * SCALE + "px";
+      actor.canvas.style.height = actor.canvas.height * SCALE + "px";
+      paint(actor.canvas, activeFrames(actor), shownFrame(actor));
+    }
+
+    function show(actor, dir) {
+      const camp = actor === actors[0] ? "allies" : "axis";
+      actor.index = nextOn(actor.index, dir, camp);
+      actor.view = views[actor.index];
+      actor.hp = HOME_HP;
+      actor.hitMs = 0;
+      actor.downMs = 0;
+      actor.jumping = false;
+      actor.prone = false;
+      setTitle();
+      updateScore();
+      dress(actor);
+      if (placed) {
+        clampFoot(actor);
+        placeHeroes();
+      }
+    }
+
+    function syncMotion(actor) {
+      if (!actor.view) return;
+      if (actor.downMs > 0 || actor.jumping) return;
+      const ax = axes(actor);
+      const next = modeFrom(ax.x, ax.y);
+      if (next === "right" || next === "left") actor.facing = next;
+      if (next !== actor.mode) {
+        if (next === "stand" && actor.mode !== "stand" && actor.walked >= WIND_AFTER) {
+          actor.winded = Math.min(8, 3 + Math.floor((actor.walked - WIND_AFTER) / 48));
+          actor.breathIn = true;
+          actor.animFrame = idle.breath;
+          actor.standHold = 260;
+          actor.standAtRest = false;
+        } else {
+          actor.standAtRest = true;
+          actor.standHold = 400 + Math.random() * 500;
+          actor.animFrame = 0;
+        }
+        if (next === "stand") actor.walked = 0;
+        actor.mode = next;
+        actor.animAcc = 0;
+        actor.moveX = 0;
+        actor.moveY = 0;
+      }
+      if (placed) paint(actor.canvas, activeFrames(actor), shownFrame(actor));
+    }
+
+    function stepActor(actor, dt) {
+      if (actor.downMs > 0) {
+        paint(actor.canvas, activeFrames(actor), shownFrame(actor));
+        return;
+      }
+      think(actor, dt);
+      syncMotion(actor);
+      if (actor.ai && !humanDriving(actor)) {
+        const foe = foeOf(actor);
+        actor.facing = foe.footX >= actor.footX ? "right" : "left";
+      }
+      if (actor.jumping) {
+        actor.animAcc += dt;
+        while (actor.animAcc >= JUMP_FRAME_MS) {
+          actor.animAcc -= JUMP_FRAME_MS;
+          actor.animFrame += 1;
+          if (actor.animFrame >= 6) {
+            actor.jumping = false;
+            actor.animFrame = 0;
+            actor.airX = 0;
+            break;
+          }
+        }
+        if (actor.airX) {
+          actor.footX += actor.airX * (shiftHeld ? speed * SHIFT_MULT : speed) * 0.7 * dt / 1000;
+          clampFoot(actor);
+        }
+        if (held[actor.keys.fire] || actor.aiFire) fireShot(actor);
+        paint(actor.canvas, activeFrames(actor), shownFrame(actor));
+        return;
+      }
+      if (actor.prone) {
+        const ax = axes(actor);
+        const len = Math.hypot(ax.x, ax.y);
+        if (len) {
+          const spd = (shiftHeld ? speed * SHIFT_MULT : speed) * CRAWL_SPEED;
+          actor.moveX += (ax.x / len) * spd * dt / 1000;
+          actor.moveY += (ax.y / len) * spd * dt / 1000;
+          const stepX = Math.trunc(actor.moveX);
+          const stepY = Math.trunc(actor.moveY);
+          actor.moveX -= stepX;
+          actor.moveY -= stepY;
+          actor.footX += stepX;
+          actor.footY += stepY;
+          clampFoot(actor);
+          actor.animAcc += dt;
+          while (actor.animAcc >= CRAWL_FRAME_MS) {
+            actor.animAcc -= CRAWL_FRAME_MS;
+            actor.animFrame = (actor.animFrame + 1) % 4;
+          }
+        } else {
+          actor.moveX = 0;
+          actor.moveY = 0;
+          actor.animAcc += dt;
+          while (actor.animAcc >= 400) {
+            actor.animAcc -= 400;
+            actor.animFrame = (actor.animFrame + 1) % 2;
+          }
+        }
+        if (held[actor.keys.fire] || actor.aiFire) fireShot(actor);
+        paint(actor.canvas, activeFrames(actor), shownFrame(actor));
+        return;
+      }
+      if (actor.mode === "stand") {
+        actor.moveX = 0;
+        actor.moveY = 0;
+        if (!reduceMotion) {
+          actor.animAcc += dt;
+          while (actor.animAcc >= actor.standHold) {
+            actor.animAcc -= actor.standHold;
+            if (actor.winded > 0) {
+              if (actor.breathIn) {
+                actor.animFrame = idle.still;
+                actor.breathIn = false;
+                actor.standHold = 340;
+                actor.winded -= 1;
+              } else {
+                actor.animFrame = idle.breath;
+                actor.breathIn = true;
+                actor.standHold = 260;
+              }
+              if (actor.winded <= 0) {
+                actor.animFrame = idle.still;
+                actor.standAtRest = true;
+                actor.standHold = 500;
+              }
+            } else if (IDLE_MODES[actor.idleMode] === "still") {
+              actor.animFrame = idle.still;
+              actor.standHold = 800;
+              actor.standAtRest = true;
+            } else if (actor.standAtRest) {
+              actor.animFrame = pickFidget(actor);
+              actor.standHold = actor.animFrame === idle.still ? 700 + Math.random() * 600 : 220 + Math.random() * 260;
+              actor.standAtRest = actor.animFrame === idle.still;
+            } else {
+              actor.animFrame = idle.still;
+              actor.standHold = 420 + Math.random() * 720;
+              actor.standAtRest = true;
+            }
+          }
+        } else {
+          actor.animFrame = 0;
+        }
+      } else {
+        const ax = axes(actor);
+        const len = Math.hypot(ax.x, ax.y);
+        const spd = shiftHeld ? speed * SHIFT_MULT : speed;
+        actor.moveX += (ax.x / len) * spd * dt / 1000;
+        actor.moveY += (ax.y / len) * spd * dt / 1000;
+        const stepX = Math.trunc(actor.moveX);
+        const stepY = Math.trunc(actor.moveY);
+        actor.moveX -= stepX;
+        actor.moveY -= stepY;
+        actor.footX += stepX;
+        actor.footY += stepY;
+        actor.walked += Math.abs(stepX) + Math.abs(stepY);
+        clampFoot(actor);
+        actor.animAcc += dt;
+        while (actor.animAcc >= WALK_FRAME_MS) {
+          actor.animAcc -= WALK_FRAME_MS;
+          actor.animFrame = (actor.animFrame + 1) % actor.view.forward.length;
+        }
+      }
+      if (held[actor.keys.fire] || actor.aiFire) fireShot(actor);
+      paint(actor.canvas, activeFrames(actor), shownFrame(actor));
+    }
+
+    function keyName(event) {
+      if (event.code === "Space" || event.key === " ") return "space";
+      if (event.key.indexOf("Arrow") === 0) return event.key;
+      return event.key.toLowerCase();
+    }
+
+    function actorForKey(name) {
+      for (let i = 0; i < actors.length; i++) {
+        const keys = actors[i].keys;
+        if (name === keys.left || name === keys.right || name === keys.up || name === keys.down || name === keys.fire || name === keys.jump || name === keys.prone) {
+          return actors[i];
+        }
+      }
+      return null;
+    }
+
+    paintLand();
+    actors.forEach(function (actor) { dress(actor); });
+    setTitle();
+    updateScore();
+
+    document.addEventListener("keydown", function (event) {
+      if (event.repeat) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const name = keyName(event);
+      const actor = actorForKey(name);
+      if (actor) {
+        event.preventDefault();
+        held[name] = true;
+        if (name === actor.keys.fire) fireShot(actor);
+        else if (name === actor.keys.jump) startJump(actor);
+        else if (name === actor.keys.prone) toggleProne(actor);
+        else syncMotion(actor);
+        return;
+      }
+      if (event.key === "Shift") {
+        shiftHeld = true;
+      } else if (event.key === "[" || event.key === "]") {
+        event.preventDefault();
+        speed = Math.max(SPEED_STEP, Math.min(80, speed + (event.key === "]" ? SPEED_STEP : -SPEED_STEP)));
+      } else if (event.key === "," || event.key === ".") {
+        event.preventDefault();
+        show(actors[0], event.key === "." ? 1 : -1);
+      } else if (event.key === "n" || event.key === "m" || event.key === "N" || event.key === "M") {
+        event.preventDefault();
+        show(actors[1], event.key === "m" || event.key === "M" ? 1 : -1);
+      } else if (event.key === "i" || event.key === "I") {
+        event.preventDefault();
+        actors.forEach(function (who) {
+          who.idleMode = (who.idleMode + 1) % IDLE_MODES.length;
+          if (IDLE_MODES[who.idleMode] === "still") {
+            who.animFrame = idle.still;
+            who.standAtRest = true;
+            who.standHold = 800;
+          }
+        });
+      }
+    });
+
+    document.addEventListener("keyup", function (event) {
+      const name = keyName(event);
+      held[name] = false;
+      const actor = actorForKey(name);
+      if (actor && name !== actor.keys.fire) syncMotion(actor);
+      if (event.key === "Shift") shiftHeld = false;
+    });
+
+    window.addEventListener("blur", function () {
+      Object.keys(held).forEach(function (key) { held[key] = false; });
+      shiftHeld = false;
+      actors.forEach(syncMotion);
+    });
+
+    window.addEventListener("resize", function () {
+      if (land) posePlanes();
+      if (!placed) return;
+      actors.forEach(clampFoot);
+      placeHeroes();
+    });
+
+    let last = 0;
+    function loop(now) {
+      if (!last) last = now;
+      let dt = now - last;
+      last = now;
+      if (dt > 120) dt = 120;
+      if (!placed && field.clientWidth) {
+        paintLand();
+        centerFeet();
+        actors.forEach(clampFoot);
+        placeHeroes();
+      }
+      actors.forEach(function (actor) { stepActor(actor, dt); });
+      if (land && !reduceMotion) {
+        landAcc += dt;
+        cloudDrift += dt * 0.012;
+        let dirty = false;
+        while (landAcc >= 140) {
+          landAcc -= 140;
+          landFrame = (landFrame + 1) % 4;
+          dirty = true;
+        }
+        if (dirty) paintPlanes();
+      }
+      stepShots(dt);
+      if (placed) placeHeroes();
+      window.requestAnimationFrame(loop);
+    }
+    window.requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
